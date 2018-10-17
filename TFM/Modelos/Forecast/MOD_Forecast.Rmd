@@ -1,0 +1,914 @@
+---
+title: "R TFM Modelos Forecast"
+output: html_document
+---
+
+```{r results='hide'}
+library(forecast)
+library(dplyr)
+library(tidyverse)
+library(lubridate)
+library(highcharter)
+library(xts)
+library(gdata)
+library(Metrics)
+library(data.table)
+library(DescTools)
+```
+
+```{r}
+setwd("~/MASTER Data Science/TFM/Modelos/Forecast")
+data <- fread("SerieTotal2016_ext_selected.csv", sep=",", header=T)
+ek_list = unique(data$element_key)
+```
+
+# Modelo Auto.arima
+
+```{r}
+results_df <- data.frame(matrix(ncol = 11, nrow = 0))
+x <- c("element_key", "num_zeros", "trim", "model", "mae_min", "mae_1q", "mae_median",
+       "mae_mean", "mae_3q", "mae_max", "acc_vector")
+colnames(results_df) <- x
+
+for (ek in ek_list){
+  data_ek = data[data$element_key== ek,]
+  data_ek_1T = subset(data_ek, data_ek$day_year >= 1 & data_ek$day_year <= 91)
+  nz = sum(data_ek_1T$occupation_perc == 0)
+  acc_1T <- c()
+  i <- 12*30  # Consideramos un mes de entrenamiento inicial
+  while(i <= nrow(data_ek_1T)-12){
+    train_data_ts_1T <- msts(data_ek_1T$occupation_perc[1:i],
+                             seasonal.periods=c(12, 12*6))
+    p <- i+1
+    q <- i+12
+    test_data_ts_1T <- data_ek_1T$occupation_perc[p:q]
+    fit.aa_1T <- auto.arima(train_data_ts_1T,seasonal=TRUE)
+    
+    tb_1T <- fit.aa_1T %>% forecast(h=12)
+    acc_1T <- rbind(acc_1T, mae(c(tb_1T$mean), test_data_ts_1T))
+    i = i+12
+  }
+  results_df[nrow(results_df) + 1,] = list(ek, nz, 1,
+                                           as.character("auto-arima"), 
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[1,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[2,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[3,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[4,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[5,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[6,1])),
+                                           list(acc_1T[,1])
+                                           )
+}
+
+fwrite(results_df, file="results_auto_arima_1t.csv")
+
+n <- nrow(results_df)
+for (i in 1:n){
+  vec_i <- results_df$acc_vector[i]
+  results_df$win_mean[i] <- mean(Winsorize(unlist(vec_i), probs=c(0, 0.95)))
+  results_df$mad[i] <- mad(unlist(vec_i))
+}
+
+fwrite(data, file="results_auto_arima_1t_extra.csv")
+```
+
+# Modelo Auto.arima con regresores
+
+```{r}
+results_df <- data.frame(matrix(ncol = 11, nrow = 0))
+x <- c("element_key", "num_zeros", "trim", "model", "mae_min", "mae_1q", "mae_median",
+       "mae_mean", "mae_3q", "mae_max", "acc_vector")
+colnames(results_df) <- x
+
+data1 <- data
+data1$day_week <- wday(data1$timestamp)
+
+data1$monday <- (data1$day_week == "1")
+data1$tuesday <- (data1$day_week == "2")
+data1$wednesday <- (data1$day_week == "3")
+data1$thursday <- (data1$day_week == "4")
+data1$friday <- (data1$day_week == "5")
+data1$saturday <- (data1$day_week == "6")
+
+for (ek in ek_list){
+  data_ek = data1[data1$element_key== ek,]
+  data_ek_1T = subset(data_ek, data_ek$day_year >= 1 & data_ek$day_year <= 91)
+  xreg <- cbind(road_temp=data_ek_1T$road_temp,
+              monday=data_ek_1T$monday,
+              tuesday=data_ek_1T$tuesday,
+              wednesday=data_ek_1T$wednesday,
+              thursday=data_ek_1T$thursday,
+              friday=data_ek_1T$friday,
+              #saturday=data_ek_1T$saturday,
+              tmin=data_ek_1T$tmin)
+  nz = sum(data_ek_1T$occupation_perc == 0)
+  acc_1T <- c()
+  i <- 12*30  # Consideramos un mes de entrenamiento inicial
+  while(i <= nrow(data_ek_1T)-12){
+    train_data_ts_1T <- msts(data_ek_1T$occupation_perc[1:i],
+                             seasonal.periods=c(12, 12*6))
+    p <- i+1
+    q <- i+12
+    test_data_ts_1T <- data_ek_1T$occupation_perc[p:q]
+    fit_aa_reg <- auto.arima(train_data_ts_1T, seasonal = TRUE,
+                       xreg=xreg[1:i])
+    
+    tb_1T <- fit_aa_reg %>% forecast(h=12, xreg=xreg[p:q])
+    acc_1T <- rbind(acc_1T, mae(c(tb_1T$mean), test_data_ts_1T))
+    i = i+12
+  }
+  results_df[nrow(results_df) + 1,] = list(ek, nz, 1,
+                                           as.character("auto-arima-regr"), 
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[1,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[2,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[3,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[4,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[5,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[6,1])),
+                                           list(acc_1T[,1])
+                                           )
+}
+
+fwrite(results_df, file="results_auto_arima_regr_1t.csv")
+
+n <- nrow(results_df)
+for (i in 1:n){
+  vec_i <- results_df$acc_vector[i]
+  results_df$win_mean[i] <- mean(Winsorize(unlist(vec_i), probs=c(0, 0.95)))
+  results_df$mad[i] <- mad(unlist(vec_i))
+}
+
+fwrite(data, file="results_auto_arima_regr_1t_extra.csv")
+```
+
+# Modelo Auto.arima con transformación logarítmica
+
+```{r}
+results_df <- data.frame(matrix(ncol = 11, nrow = 0))
+x <- c("element_key", "num_zeros", "trim", "model", "mae_min", "mae_1q", "mae_median",
+       "mae_mean", "mae_3q", "mae_max", "acc_vector")
+colnames(results_df) <- x
+
+log_transform <- function(x) log(1 + x)
+inv_log_transform <- function(y) exp(y) - 1
+
+for (ek in ek_list){
+  data_ek = data[data$element_key== ek,]
+  data_ek_1T = subset(data_ek, data_ek$day_year >= 1 & data_ek$day_year <= 91)
+  
+  nz = sum(data_ek_1T$occupation_perc == 0)
+  acc_1T <- c()
+  i <- 12*30  # Consideramos un mes de entrenamiento inicial
+  while(i <= nrow(data_ek_1T)-12){
+    train_data_ts_1T <- msts(data_ek_1T$occupation_perc[1:i],
+                             seasonal.periods=c(12, 12*6))
+    train_data_ts_1T_log <- log_transform(train_data_ts_1T)
+    p <- i+1
+    q <- i+12
+    test_data_ts_1T <- data_ek_1T$occupation_perc[p:q]
+    fit_aa_reg <- auto.arima(train_data_ts_1T_log,seasonal=TRUE)
+    
+    tb_1T <- fit_aa_reg %>% forecast(h=12)
+    acc_1T <- rbind(acc_1T, mae(c(inv_log_transform(tb_1T$mean)),
+                                test_data_ts_1T))
+    i = i+12
+  }
+  results_df[nrow(results_df) + 1,] = list(ek, nz, 1,
+                                           as.character("auto-arima-log"), 
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[1,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[2,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[3,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[4,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[5,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[6,1])),
+                                           list(acc_1T[,1])
+                                           )
+}
+
+fwrite(results_df, file="results_auto_arima_log_1t.csv")
+
+n <- nrow(results_df)
+for (i in 1:n){
+  vec_i <- results_df$acc_vector[i]
+  results_df$win_mean[i] <- mean(Winsorize(unlist(vec_i), probs=c(0, 0.95)))
+  results_df$mad[i] <- mad(unlist(vec_i))
+}
+
+fwrite(data, file="results_auto_arima_log_1t_extra.csv")
+```
+
+# Modelo Auto.arima con regresores y transformación logarítmica
+
+```{r}
+results_df <- data.frame(matrix(ncol = 11, nrow = 0))
+x <- c("element_key", "num_zeros", "trim", "model", "mae_min", "mae_1q", "mae_median",
+       "mae_mean", "mae_3q", "mae_max", "acc_vector")
+colnames(results_df) <- x
+
+log_transform <- function(x) log(1 + x)
+inv_log_transform <- function(y) exp(y) - 1
+
+for (ek in ek_list){
+  data_ek = data[data$element_key== ek,]
+  data_ek_1T = subset(data_ek, data_ek$day_year >= 1 & data_ek$day_year <= 91)
+  xreg <- cbind(road_temp=data_ek_1T$road_temp,
+                monday=data_ek_1T$monday,
+                tuesday=data_ek_1T$tuesday,
+                wednesday=data_ek_1T$wednesday,
+                thursday=data_ek_1T$thursday,
+                friday=data_ek_1T$friday,
+                #saturday=data_ek_1T$saturday,
+                tmin=data_ek_1T$tmin)
+  nz = sum(data_ek_1T$occupation_perc == 0)
+  acc_1T <- c()
+  i <- 12*30  # Consideramos un mes de entrenamiento inicial
+  while(i <= nrow(data_ek_1T)-12){
+    train_data_ts_1T <- msts(data_ek_1T$occupation_perc[1:i],
+                             seasonal.periods=c(12, 12*6))
+    train_data_ts_1T_log <- log_transform(train_data_ts_1T)
+    p <- i+1
+    q <- i+12
+    test_data_ts_1T <- data_ek_1T$occupation_perc[p:q]
+    fit_aa_reg <- auto.arima(train_data_ts_1T_log,seasonal=TRUE,xreg=xreg[1:i])
+    
+    tb_1T <- fit_aa_reg %>% forecast(h=12, xreg=xreg[p:q])
+    acc_1T <- rbind(acc_1T, mae(c(inv_log_transform(tb_1T$mean)),
+                                test_data_ts_1T))
+    i = i+12
+  }
+  results_df[nrow(results_df) + 1,] = list(ek, nz, 1,
+                                           as.character("auto-arima-regr-log"), 
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[1,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[2,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[3,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[4,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[5,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[6,1])),
+                                           list(acc_1T[,1])
+                                           )
+}
+
+fwrite(results_df, file="results_auto_arima_regr_log_1t.csv")
+
+n <- nrow(results_df)
+for (i in 1:n){
+  vec_i <- results_df$acc_vector[i]
+  results_df$win_mean[i] <- mean(Winsorize(unlist(vec_i), probs=c(0, 0.95)))
+  results_df$mad[i] <- mad(unlist(vec_i))
+}
+
+fwrite(data, file="results_auto_arima_regr_log_1t_extra.csv")
+```
+
+# Modelo de Media Móvil
+
+```{r}
+results_df <- data.frame(matrix(ncol = 11, nrow = 0))
+x <- c("element_key", "num_zeros", "trim", "model", "mae_min", "mae_1q", "mae_median",
+       "mae_mean", "mae_3q", "mae_max", "acc_vector")
+colnames(results_df) <- x
+
+for (ek in ek_list){
+  data_ek = data[data$element_key== ek,]
+  data_ek_1T = subset(data_ek, data_ek$day_year >= 1 & data_ek$day_year <= 91)
+  nz = sum(data_ek_1T$occupation_perc == 0)
+  acc_1T <- c()
+  i <- 12*30  # Consideramos un mes de entrenamiento inicial
+  while(i <= nrow(data_ek_1T)-12){
+    train_data_ts_1T <- msts(data_ek_1T$occupation_perc[1:i], seasonal.periods=c(12, 12*6))
+    p <- i+1
+    q <- i+12
+    test_data_ts_1T <- data_ek_1T$occupation_perc[p:q]
+    fit.ma_1T <- ma(train_data_ts_1T, order = 3)
+    tb_1T <- fit.ma_1T %>% forecast(h=12)
+    acc_1T <- rbind(acc_1T, mae(c(tb_1T$mean), test_data_ts_1T))
+    i = i+12
+  }
+  results_df[nrow(results_df) + 1,] = list(ek, nz, 1, as.character("ma"), 
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[1,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[2,1])),
+                                           as.numeric(sub('.*:', '', 
+                                                        summary(acc_1T)[3,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[4,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[5,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[6,1])),
+                                           list(acc_1T[,1])
+                                           )
+}
+
+fwrite(results_df, file="results_ma_1t.csv")
+
+n <- nrow(results_df)
+for (i in 1:n){
+  vec_i <- results_df$acc_vector[i]
+  results_df$win_mean[i] <- mean(Winsorize(unlist(vec_i), probs=c(0, 0.95)))
+  results_df$mad[i] <- mad(unlist(vec_i))
+}
+
+fwrite(data, file="results_ma_1t_extra.csv")
+```
+
+# Modelo de Media Móvil con transformación logarítmica
+
+```{r}
+results_df <- data.frame(matrix(ncol = 11, nrow = 0))
+x <- c("element_key", "num_zeros", "trim", "model", "mae_min", "mae_1q", "mae_median",
+       "mae_mean", "mae_3q", "mae_max", "acc_vector")
+colnames(results_df) <- x
+
+log_transform <- function(x) log(1 + x)
+inv_log_transform <- function(y) exp(y) - 1
+
+for (ek in ek_list){
+  data_ek = data[data$element_key== ek,]
+  data_ek_1T = subset(data_ek, data_ek$day_year >= 1 & data_ek$day_year <= 91)
+  nz = sum(data_ek_1T$occupation_perc == 0)
+  acc_1T <- c()
+  i <- 12*30  # Consideramos un mes de entrenamiento inicial
+  while(i <= nrow(data_ek_1T)-12){
+    train_data_ts_1T <- msts(data_ek_1T$occupation_perc[1:i],
+                             seasonal.periods=c(12, 12*6))
+    train_data_ts_1T_log <- log_transform(train_data_ts_1T)
+    p <- i+1
+    q <- i+12
+    test_data_ts_1T <- data_ek_1T$occupation_perc[p:q]
+    fit.ma_1T <- ma(train_data_ts_1T_log, order = 3)
+    
+    tb_1T <- fit.ma_1T %>% forecast(h=12)
+    acc_1T <- rbind(acc_1T, mae(c(inv_log_transform(tb_1T$mean)),
+                                test_data_ts_1T))
+    i = i+12
+  }
+  results_df[nrow(results_df) + 1,] = list(ek, nz, 1,
+                                           as.character("ma-log"), 
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[1,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[2,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[3,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[4,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[5,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[6,1])),
+                                           list(acc_1T[,1])
+                                           )
+}
+
+fwrite(results_df, file="results_ma_log_1t.csv")
+
+n <- nrow(results_df)
+for (i in 1:n){
+  vec_i <- results_df$acc_vector[i]
+  results_df$win_mean[i] <- mean(Winsorize(unlist(vec_i), probs=c(0, 0.95)))
+  results_df$mad[i] <- mad(unlist(vec_i))
+}
+
+fwrite(data, file="results_ma_log_1t_extra.csv")
+```
+
+# Modelo Holt-Winters
+
+```{r}
+results_df <- data.frame(matrix(ncol = 11, nrow = 0))
+x <- c("element_key", "num_zeros", "trim", "model", "mae_min", "mae_1q", "mae_median",
+       "mae_mean", "mae_3q", "mae_max", "acc_vector")
+colnames(results_df) <- x
+
+for (ek in ek_list){
+  data_ek = data[data$element_key== ek,]
+  data_ek_1T = subset(data_ek, data_ek$day_year >= 1 & data_ek$day_year <= 91)
+  nz = sum(data_ek_1T$occupation_perc == 0)
+  acc_1T <- c()
+  i <- 12*30  # Consideramos un mes de entrenamiento inicial
+  while(i <= nrow(data_ek_1T)-12){
+    train_data_ts_1T <- msts(data_ek_1T$occupation_perc[1:i], seasonal.periods=c(12, 12*6))
+    p <- i+1
+    q <- i+12
+    test_data_ts_1T <- data_ek_1T$occupation_perc[p:q]
+    fit.hw_1T <- HoltWinters(train_data_ts_1T)
+    tb_1T <- fit.hw_1T %>% forecast(h=12)
+    acc_1T <- rbind(acc_1T, mae(c(tb_1T$mean), test_data_ts_1T))
+    i = i+12
+  }
+  results_df[nrow(results_df) + 1,] = list(ek, nz, 1, as.character("hw"), 
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[1,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[2,1])),
+                                           as.numeric(sub('.*:', '', 
+                                                        summary(acc_1T)[3,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[4,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[5,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[6,1])),
+                                           list(acc_1T[,1])
+                                           )
+}
+
+fwrite(results_df, file="results_hw_1t.csv")
+
+n <- nrow(results_df)
+for (i in 1:n){
+  vec_i <- results_df$acc_vector[i]
+  results_df$win_mean[i] <- mean(Winsorize(unlist(vec_i), probs=c(0, 0.95)))
+  results_df$mad[i] <- mad(unlist(vec_i))
+}
+
+fwrite(data, file="results_hw_1t_extra.csv")
+```
+
+# Modelo Holt-Winters con transformación logarítmica
+
+```{r}
+results_df <- data.frame(matrix(ncol = 11, nrow = 0))
+x <- c("element_key", "num_zeros", "trim", "model", "mae_min", "mae_1q", "mae_median",
+       "mae_mean", "mae_3q", "mae_max", "acc_vector")
+colnames(results_df) <- x
+
+log_transform <- function(x) log(1 + x)
+inv_log_transform <- function(y) exp(y) - 1
+
+for (ek in ek_list){
+  data_ek = data[data$element_key== ek,]
+  data_ek_1T = subset(data_ek, data_ek$day_year >= 1 & data_ek$day_year <= 91)
+  nz = sum(data_ek_1T$occupation_perc == 0)
+  acc_1T <- c()
+  i <- 12*30  # Consideramos un mes de entrenamiento inicial
+  while(i <= nrow(data_ek_1T)-12){
+    train_data_ts_1T <- msts(data_ek_1T$occupation_perc[1:i],
+                             seasonal.periods=c(12, 12*6))
+    train_data_ts_1T_log <- log_transform(train_data_ts_1T)
+    p <- i+1
+    q <- i+12
+    test_data_ts_1T <- data_ek_1T$occupation_perc[p:q]
+    fit.hw_1T <- HoltWinters(train_data_ts_1T_log)
+    tb_1T <- fit.hw_1T %>% forecast(h=12)
+    acc_1T <- rbind(acc_1T, mae(c(inv_log_transform(tb_1T$mean)),
+                                test_data_ts_1T))
+    i = i+12
+  }
+  results_df[nrow(results_df) + 1,] = list(ek, nz, 1,
+                                           as.character("hw-log"), 
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[1,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[2,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[3,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[4,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[5,1])),
+                                           as.numeric(sub('.*:', '',
+                                                        summary(acc_1T)[6,1])),
+                                           list(acc_1T[,1])
+                                           )
+}
+
+fwrite(results_df, file="results_hw_log_1t.csv")
+
+n <- nrow(results_df)
+for (i in 1:n){
+  vec_i <- results_df$acc_vector[i]
+  results_df$win_mean[i] <- mean(Winsorize(unlist(vec_i), probs=c(0, 0.95)))
+  results_df$mad[i] <- mad(unlist(vec_i))
+}
+
+fwrite(data, file="results_hw_log_1t_extra.csv")
+```
+
+# Modelo BATS
+
+```{r}
+results_df <- data.frame(matrix(ncol = 11, nrow = 0))
+x <- c("element_key", "num_zeros", "trim", "model", "mae_min", "mae_1q", "mae_median",
+       "mae_mean", "mae_3q", "mae_max", "acc_vector")
+colnames(results_df) <- x
+
+for (ek in ek_list){
+  data_ek = data[data$element_key== ek,]
+  data_ek_1T = subset(data_ek, data_ek$day_year >= 1 & data_ek$day_year <= 91)
+  nz = sum(data_ek_1T$occupation_perc == 0)
+  acc_1T <- c()
+  i <- 12*30  # Consideramos un mes de entrenamiento inicial
+  while(i <= nrow(data_ek_1T)-12){
+    train_data_ts_1T <- msts(data_ek_1T$occupation_perc[1:i], seasonal.periods=c(12, 12*6))
+    p <- i+1
+    q <- i+12
+    test_data_ts_1T <- data_ek_1T$occupation_perc[p:q]
+    fit.bats_1T <- bats(train_data_ts_1T)
+    tb_1T <- fit.bats_1T %>% forecast(h=12)
+    acc_1T <- rbind(acc_1T, mae(c(tb_1T$mean), test_data_ts_1T))
+    i = i+12
+  }
+  results_df[nrow(results_df) + 1,] = list(ek, nz, 1, as.character("bats"), 
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[1,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[2,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[3,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[4,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[5,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[6,1])),
+                                           list(acc_1T[,1])
+  )
+}
+
+fwrite(results_df, file="results_bats_1t.csv")
+
+n <- nrow(results_df)
+for (i in 1:n){
+  vec_i <- results_df$acc_vector[i]
+  results_df$win_mean[i] <- mean(Winsorize(unlist(vec_i), probs=c(0, 0.95)))
+  results_df$mad[i] <- mad(unlist(vec_i))
+}
+
+fwrite(data, file="results_bats_1t_extra.csv")
+```
+
+# Modelo BATS con transformación logarítmica
+
+```{r}
+results_df <- data.frame(matrix(ncol = 11, nrow = 0))
+x <- c("element_key", "num_zeros", "trim", "model", "mae_min", "mae_1q", "mae_median",
+       "mae_mean", "mae_3q", "mae_max", "acc_vector")
+colnames(results_df) <- x
+
+log_transform <- function(x) log(1 + x)
+inv_log_transform <- function(y) exp(y) - 1
+
+for (ek in ek_list){
+  data_ek = data[data$element_key== ek,]
+  data_ek_1T = subset(data_ek, data_ek$day_year >= 1 & data_ek$day_year <= 91)
+  nz = sum(data_ek_1T$occupation_perc == 0)
+  acc_1T <- c()
+  i <- 12*30  # Consideramos un mes de entrenamiento inicial
+  while(i <= nrow(data_ek_1T)-12){
+    train_data_ts_1T <- msts(data_ek_1T$occupation_perc[1:i], seasonal.periods=c(12, 12*6))
+    train_data_ts_1T_log <- log_transform(train_data_ts_1T)
+    p <- i+1
+    q <- i+12
+    test_data_ts_1T <- data_ek_1T$occupation_perc[p:q]
+    fit.bats_1T <- bats(train_data_ts_1T_log)
+    fb_1T <- fit.bats_1T %>% forecast(h=12)
+    acc_1T <- rbind(acc_1T, mae(c(inv_log_transform(fb_1T$mean)), test_data_ts_1T))
+    i = i+12
+  }
+  results_df[nrow(results_df) + 1,] = list(ek, nz, 1, as.character("bats-log"), 
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[1,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[2,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[3,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[4,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[5,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[6,1])),
+                                           list(acc_1T[,1])
+  )
+}
+
+fwrite(results_df, file="results_bats_log_1t.csv")
+
+n <- nrow(results_df)
+for (i in 1:n){
+  vec_i <- results_df$acc_vector[i]
+  results_df$win_mean[i] <- mean(Winsorize(unlist(vec_i), probs=c(0, 0.95)))
+  results_df$mad[i] <- mad(unlist(vec_i))
+}
+
+fwrite(data, file="results_bats_log_1t_extra.csv")
+```
+
+# Modelo TBATS
+
+```{r}
+results_df <- data.frame(matrix(ncol = 11, nrow = 0))
+x <- c("element_key", "num_zeros", "trim", "model", "mae_min", "mae_1q", "mae_median",
+       "mae_mean", "mae_3q", "mae_max", "acc_vector")
+colnames(results_df) <- x
+
+for (ek in ek_list){
+  data_ek = data[data$element_key== ek,]
+  data_ek_1T = subset(data_ek, data_ek$day_year >= 1 & data_ek$day_year <= 91)
+  nz = sum(data_ek_1T$occupation_perc == 0)
+  acc_1T <- c()
+  i <- 12*30  # Consideramos un mes de entrenamiento inicial
+  while(i <= nrow(data_ek_1T)-12){
+    train_data_ts_1T <- msts(data_ek_1T$occupation_perc[1:i], seasonal.periods=c(12, 12*6))
+    p <- i+1
+    q <- i+12
+    test_data_ts_1T <- data_ek_1T$occupation_perc[p:q]
+    fit.tbats_1T <- tbats(train_data_ts_1T)
+    tb_1T <- fit.tbats_1T %>% forecast(h=12)
+    acc_1T <- rbind(acc_1T, mae(c(tb_1T$mean), test_data_ts_1T))
+    i = i+12
+  }
+  results_df[nrow(results_df) + 1,] = list(ek, nz, 1, as.character("tbats"), 
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[1,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[2,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[3,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[4,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[5,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[6,1])),
+                                           list(acc_1T[,1])
+                                           )
+}
+
+fwrite(results_df, file="results_tbats_1t.csv")
+
+n <- nrow(results_df)
+for (i in 1:n){
+  vec_i <- results_df$acc_vector[i]
+  results_df$win_mean[i] <- mean(Winsorize(unlist(vec_i), probs=c(0, 0.95)))
+  results_df$mad[i] <- mad(unlist(vec_i))
+}
+
+fwrite(data, file="results_tbats_1t_extra.csv")
+```
+
+# Modelo TBATS con transformación logarítmica
+
+```{r}
+results_df <- data.frame(matrix(ncol = 11, nrow = 0))
+x <- c("element_key", "num_zeros", "trim", "model", "mae_min", "mae_1q", "mae_median",
+       "mae_mean", "mae_3q", "mae_max", "acc_vector")
+colnames(results_df) <- x
+
+log_transform <- function(x) log(1 + x)
+inv_log_transform <- function(y) exp(y) - 1
+
+for (ek in ek_list){
+  data_ek = data[data$element_key== ek,]
+  data_ek_1T = subset(data_ek, data_ek$day_year >= 1 & data_ek$day_year <= 91)
+  nz = sum(data_ek_1T$occupation_perc == 0)
+  acc_1T <- c()
+  i <- 12*30  # Consideramos un mes de entrenamiento inicial
+  while(i <= nrow(data_ek_1T)-12){
+    train_data_ts_1T <- msts(data_ek_1T$occupation_perc[1:i], seasonal.periods=c(12, 12*6))
+    train_data_ts_1T_log <- log_transform(train_data_ts_1T)
+    p <- i+1
+    q <- i+12
+    test_data_ts_1T <- data_ek_1T$occupation_perc[p:q]
+    fit.tbats_1T <- tbats(train_data_ts_1T_log)
+    tb_1T <- fit.tbats_1T %>% forecast(h=12)
+    acc_1T <- rbind(acc_1T, mae(c(inv_log_transform(tb_1T$mean)), test_data_ts_1T))
+    i = i+12
+  }
+  results_df[nrow(results_df) + 1,] = list(ek, nz, 1, as.character("tbats-log"), 
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[1,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[2,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[3,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[4,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[5,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[6,1])),
+                                           list(acc_1T[,1])
+  )
+}
+
+fwrite(results_df, file="results_tbats_log_1t.csv")
+
+n <- nrow(results_df)
+for (i in 1:n){
+  vec_i <- results_df$acc_vector[i]
+  results_df$win_mean[i] <- mean(Winsorize(unlist(vec_i), probs=c(0, 0.95)))
+  results_df$mad[i] <- mad(unlist(vec_i))
+}
+
+fwrite(data, file="results_tbats_log_1t_extra.csv")
+```
+
+# Modelo MSTL
+
+```{r}
+results_df <- data.frame(matrix(ncol = 11, nrow = 0))
+x <- c("element_key", "num_zeros", "trim", "model", "mae_min", "mae_1q", "mae_median",
+       "mae_mean", "mae_3q", "mae_max", "acc_vector")
+colnames(results_df) <- x
+
+for (ek in ek_list){
+  data_ek = data[data$element_key== ek,]
+  data_ek_1T = subset(data_ek, data_ek$day_year >= 1 & data_ek$day_year <= 91)
+  nz = sum(data_ek_1T$occupation_perc == 0)
+  acc_1T <- c()
+  i <- 12*30  # Consideramos un mes de entrenamiento inicial
+  while(i <= nrow(data_ek_1T)-12){
+    train_data_ts_1T <- msts(data_ek_1T$occupation_perc[1:i], seasonal.periods=c(12, 12*6))
+    p <- i+1
+    q <- i+12
+    test_data_ts_1T <- data_ek_1T$occupation_perc[p:q]
+    fit.mstl_1T <- mstl(train_data_ts_1T, s.window="periodic")
+    mst_1T <- fit.mstl_1T %>% forecast(h=12)
+    acc_1T <- rbind(acc_1T, mae(c(mst_1T$mean), test_data_ts_1T))
+    i = i+12
+  }
+  results_df[nrow(results_df) + 1,] = list(ek, nz, 1, as.character("mstl"), 
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[1,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[2,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[3,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[4,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[5,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[6,1])),
+                                           list(acc_1T[,1])
+  )
+}
+
+fwrite(results_df, file="results_stl_1t.csv")
+
+n <- nrow(results_df)
+for (i in 1:n){
+  vec_i <- results_df$acc_vector[i]
+  results_df$win_mean[i] <- mean(Winsorize(unlist(vec_i), probs=c(0, 0.95)))
+  results_df$mad[i] <- mad(unlist(vec_i))
+}
+
+fwrite(data, file="results_stl_1t_extra.csv")
+```
+
+# Modelo MSTL con transformación logarítmica
+
+```{r}
+results_df <- data.frame(matrix(ncol = 11, nrow = 0))
+x <- c("element_key", "num_zeros", "trim", "model", "mae_min", "mae_1q", "mae_median",
+       "mae_mean", "mae_3q", "mae_max", "acc_vector")
+colnames(results_df) <- x
+
+log_transform <- function(x) log(1 + x)
+inv_log_transform <- function(y) exp(y) - 1
+
+for (ek in ek_list){
+  data_ek = data[data$element_key== ek,]
+  data_ek_1T = subset(data_ek, data_ek$day_year >= 1 & data_ek$day_year <= 91)
+  nz = sum(data_ek_1T$occupation_perc == 0)
+  acc_1T <- c()
+  i <- 12*30  # Consideramos un mes de entrenamiento inicial
+  while(i <= nrow(data_ek_1T)-12){
+    train_data_ts_1T <- msts(data_ek_1T$occupation_perc[1:i], seasonal.periods=c(12, 12*6))
+    train_data_ts_1T_log <- log_transform(train_data_ts_1T)
+    p <- i+1
+    q <- i+12
+    test_data_ts_1T <- data_ek_1T$occupation_perc[p:q]
+    fit.mstl_1T <- mstl(train_data_ts_1T_log)
+    mst_1T <- fit.mstl_1T %>% forecast(h=12)
+    acc_1T <- rbind(acc_1T, mae(c(inv_log_transform(mst_1T$mean)), test_data_ts_1T))
+    i = i+12
+  }
+  results_df[nrow(results_df) + 1,] = list(ek, nz, 1, as.character("mstl-log"), 
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[1,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[2,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[3,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[4,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[5,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[6,1])),
+                                           list(acc_1T[,1])
+  )
+}
+
+fwrite(results_df, file="results_mstl_log_1t.csv")
+
+n <- nrow(results_df)
+for (i in 1:n){
+  vec_i <- results_df$acc_vector[i]
+  results_df$win_mean[i] <- mean(Winsorize(unlist(vec_i), probs=c(0, 0.95)))
+  results_df$mad[i] <- mad(unlist(vec_i))
+}
+
+fwrite(data, file="results_mstl_1t_extra.csv")
+
+```
+
+# Modelo DSHW
+
+```{r}
+results_df <- data.frame(matrix(ncol = 11, nrow = 0))
+x <- c("element_key", "num_zeros", "trim", "model", "mae_min", "mae_1q", "mae_median",
+       "mae_mean", "mae_3q", "mae_max", "acc_vector")
+colnames(results_df) <- x
+
+lc <- function(x) (1000000 + x)
+inv_lc <- function(y) (y - 1000000)
+
+for (ek in ek_list){
+  data_ek = data[data$element_key== ek,]
+  data_ek_1T = subset(data_ek, data_ek$day_year >= 1 & data_ek$day_year <= 91)
+  nz = sum(data_ek_1T$occupation_perc == 0)
+  acc_1T <- c()
+  i <- 12*30  # Consideramos un mes de entrenamiento inicial
+  while(i <= nrow(data_ek_1T)-12){
+    train_data_ts_1T <- msts(data_ek_1T$occupation_perc[1:i], seasonal.periods=c(12, 12*6))
+    train_data_ts_1T_lc <- lc(train_data_ts_1T)
+    p <- i+1
+    q <- i+12
+    test_data_ts_1T <- data_ek_1T$occupation_perc[p:q]
+    fit.dshw_1T <- dshw(train_data_ts_1T_lc)
+    tb_1T <- fit.dshw_1T %>% forecast(h=12)
+    acc_1T <- rbind(acc_1T, mae(c(inv_lc(tb_1T$mean)), test_data_ts_1T))
+    i = i+12
+  }
+  results_df[nrow(results_df) + 1,] = list(ek, nz, 1, as.character("dshw"), 
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[1,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[2,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[3,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[4,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[5,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[6,1])),
+                                           list(acc_1T[,1])
+  )
+}
+
+fwrite(results_df, file="results_dshw_1t.csv")
+
+n <- nrow(results_df)
+for (i in 1:n){
+  vec_i <- results_df$acc_vector[i]
+  results_df$win_mean[i] <- mean(Winsorize(unlist(vec_i), probs=c(0, 0.95)))
+  results_df$mad[i] <- mad(unlist(vec_i))
+}
+
+fwrite(data, file="results_dshw_1t_extra.csv")
+```
+
+# Modelo DSHW con transformación logarítmica
+
+```{r}
+results_df <- data.frame(matrix(ncol = 11, nrow = 0))
+x <- c("element_key", "num_zeros", "trim", "model", "mae_min", "mae_1q", "mae_median",
+       "mae_mean", "mae_3q", "mae_max", "acc_vector")
+colnames(results_df) <- x
+
+log_transform <- function(x) log(1 + x)
+inv_log_transform <- function(y) exp(y) - 1
+
+lc <- function(x) (1000000 + x)
+inv_lc <- function(y) (y - 1000000)
+
+for (ek in ek_list){
+  data_ek = data[data$element_key== ek,]
+  data_ek_1T = subset(data_ek, data_ek$day_year >= 1 & data_ek$day_year <= 91)
+  nz = sum(data_ek_1T$occupation_perc == 0)
+  acc_1T <- c()
+  i <- 12*30  # Consideramos un mes de entrenamiento inicial
+  while(i <= nrow(data_ek_1T)-12){
+    train_data_ts_1T <- msts(data_ek_1T$occupation_perc[1:i], seasonal.periods=c(12, 12*6))
+    train_data_ts_1T_log <- log_transform(lc(train_data_ts_1T))
+    p <- i+1
+    q <- i+12
+    test_data_ts_1T <- data_ek_1T$occupation_perc[p:q]
+    fit.dshw_1T <- dshw(train_data_ts_1T_log)
+    tb_1T <- fit.dshw_1T %>% forecast(h=12)
+    acc_1T <- rbind(acc_1T, mae(c(inv_log_transform(inv_lc(tb_1T$mean))), test_data_ts_1T))
+    i = i+12
+  }
+  results_df[nrow(results_df) + 1,] = list(ek, nz, 1, as.character("dshw-log"), 
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[1,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[2,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[3,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[4,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[5,1])),
+                                           as.numeric(sub('.*:', '', summary(acc_1T)[6,1])),
+                                           list(acc_1T[,1])
+  )
+}
+
+fwrite(results_df, file="results_dshw_log_1t.csv")
+
+n <- nrow(results_df)
+for (i in 1:n){
+  vec_i <- results_df$acc_vector[i]
+  results_df$win_mean[i] <- mean(Winsorize(unlist(vec_i), probs=c(0, 0.95)))
+  results_df$mad[i] <- mad(unlist(vec_i))
+}
+
+fwrite(data, file="results_dshw_log_1t_extra.csv")
+```
+
+

@@ -1,0 +1,130 @@
+---
+title: "MOD_spTimer"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+if(!require("spTimer")){
+  install.packages("spTimer")
+  library("spTimer")
+}
+library(dplyr)
+library(Metrics)
+library(DescTools)
+```
+
+Importamos dataset, creamos columnas dummies para los días de la semana y acotamos la serie a los 3 primeros meses del año para reducir el tiempo de ejecución
+
+```{r}
+STdata <- read.table("SerieTotal2016_ext_selected.csv", sep=",", header=T)
+
+STdata <- STdata %>% mutate(
+    Month = as.integer(format(as.POSIXlt(timestamp), '%m')),
+    Day =  as.integer(format(as.POSIXlt(timestamp), '%d')),
+    Year = as.integer(format(as.POSIXlt(timestamp),'%Y')),
+    Hour = as.integer(format(as.POSIXlt(timestamp),'%H')),
+    day_week = as.integer(format(as.POSIXlt(timestamp),'%u'))
+)
+STdata$monday <- ifelse(STdata$day_week == "1", 1, 0)
+STdata$tuesday <- ifelse(STdata$day_week == "2", 1, 0)
+STdata$wednesday <- ifelse(STdata$day_week == "3", 1, 0)
+STdata$thursday <- ifelse(STdata$day_week == "4", 1, 0)
+STdata$friday <- ifelse(STdata$day_week == "5", 1, 0)
+STdata$saturday <- ifelse(STdata$day_week == "6", 1, 0)
+
+STdata_0 <- select(STdata, element_key, latitude, longitude, Month, Day, Hour,
+                   road_temp, monday, tuesday, wednesday, thursday, friday, tmin,
+                   day_year, occupation_perc)
+ek_list <- unique(STdata_0$element_key)
+STdata_final <- filter(STdata_0, (element_key %in% ek_list) & (Month <= 3))
+day_list <- unique(STdata_final$day_year)
+```
+
+Realizamos validación nesteada comenzando con 30 días hábiles de entrenamiento, considerando el último día para selección del mejor modelo entre GP (Gaussian process) o AR (Bayessian Auto-Regressive), y realizando la predicción del día siguiente (12 horas) y guardando el valor de MAE. Iteramos ampliando el conjunto de entrenamiento en un día hasta un total de 48 veces cuando el último conjunto de entrenamiento abarca el total de la serie de 77 días hábiles y realizamos la predicción del último día.
+
+```{r}
+models = c("GP", "AR")
+
+resultados_test <- c()
+
+set.seed(11)
+n <- 30 
+for (i in n:(length(day_list)-1)){
+  train <- filter(STdata_final, (day_year %in% c(day_list[1:(i-1)])))
+  val <- filter(STdata_final, (day_year %in% c(day_list[i])))
+  train_val <- filter(STdata_final, (day_year %in% c(day_list[1:i])))
+  test <- filter(STdata_final, (day_year %in% c(day_list[i+1])))
+
+  resultados_val <- c()
+    
+  for (mod in models){
+    post.gp <- spT.Gibbs(formula=occupation_perc~Hour+tmin+road_temp+monday+
+                           tuesday+wednesday+thursday+friday,
+                         data=train,
+                         model=mod,
+                         coords=~longitude+latitude,
+                         distance.method="geodetic:km",
+                         scale.transform="NONE",
+                         tol.dist=0.001,
+                         spatial.decay=spT.decay(distribution=Gamm(2,1),
+                                                 tuning=0.01))
+    fore.coords<-as.matrix(unique(cbind(val[,2:3])))
+    fore.gp <- predict(post.gp, newdata=val, newcoords=fore.coords,
+                       type="temporal", foreStep=12, tol.dist=0.001)
+    val_matrix <- as.matrix(val$occupation_perc, ncol=length(ek_list))
+    val_mae <- as.numeric(spT.validation(val_matrix, c(fore.gp$Mean))['MAE'])
+    res_row <- data.frame(model=mod, transf="NONE", MAE=val_mae)
+    resultados_val <- rbind(resultados_val, res_row)
+  }      
+  
+  sel <- subset(resultados_val, 
+                with(resultados_val,
+                     resultados_val$MAE==min(resultados_val$MAE)))
+  post.gp <- spT.Gibbs(formula=occupation_perc ~ Hour+tmin+road_temp+
+                         monday+tuesday+wednesday+thursday+friday,
+                       data=train_val,
+                       model=sel[1,1], 
+                       coords=~longitude+latitude,
+                       distance.method="geodetic:km", 
+                       scale.transform=sel[1,2],
+                       tol.dist=0.001,
+                       spatial.decay=spT.decay(distribution=Gamm(2,1),
+                                               tuning=0.01))
+  fore.coords <- as.matrix(unique(cbind(test[,2:3])))
+  fore.gp <- predict(post.gp, newdata=test, newcoords=fore.coords,
+                     type="temporal", foreStep=12, tol.dist=0.001)
+  test_matrix <- matrix(test$occupation_perc, ncol=length(ek_list))
+  for (j in (1:length(ek_list))){
+    test_mae_ek <- mae(test_matrix[,j], fore.gp$Mean[,j])
+    res_row <- data.frame(ek=ek_list[j], MAE=test_mae_ek)
+    resultados_test <- rbind(resultados_test, res_row)
+  }
+}
+
+```
+
+Generamos dos ficheros, uno con los resultados de todos los MAEs obtenidos durante las iteraciones de la validación nesteada, y otro con dos estadísticos calculados a partir de esos resultados (media winsorizada al 5% superior y MAD) y que son los que utilizaremos para realizar la comparativa entre distintos modelos.
+
+```{r}
+resultados_final <- data.frame(matrix(ncol=3, nrow=0))
+cols <- c('element_key', 'win_mean', 'mad')
+colnames(resultados_final) <- cols
+
+for (elk in ek_list){
+  res_ek <- filter(resultados_test, ek == elk)
+  wm_ek <- mean(Winsorize(res_ek$MAE, probs=c(0, 0.95)))
+  mad_ek <- mad(res_ek$MAE)
+  resultados_final[nrow(resultados_final)+1,] = list(elk, wm_ek, mad_ek)
+}
+
+write.csv(resultados_final, file='results_sptimer_1t_alleks.csv',
+          row.names=FALSE)
+
+write.csv(resultados_test, file='results_test_sptimer_1t_alleks.csv',
+          row.names=FALSE)
+```
+

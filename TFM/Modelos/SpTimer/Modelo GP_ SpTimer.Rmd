@@ -1,0 +1,176 @@
+---
+title: "GP SpTimer Seattle"
+output: html_notebook
+---
+
+NOTEBOOK CON MODELO Gaussian processes (GP) DE SPTIMER
+
+-> Importamos dataset
+-> Creamos columnas año, mes, día, hora y día de la semana
+-> Seleccionamos las variables ordenadamente y meses hasta Abril de 
+
+
+```{r}
+setwd("C:/Users/CINTIA/Desktop/ProyectoFindeMaster")
+STdata <- read.table("SerieTotal2016_ext_selected.csv", sep=",", header=T)
+
+library(dplyr)
+
+
+if(!require("spTimer")){
+  install.packages("spTimer")
+  library("spTimer")
+}
+
+STdata <- STdata %>%
+  mutate(
+    Month = format(as.POSIXlt(timestamp), '%m'),
+    Day =  format(as.POSIXlt(timestamp), '%d'),
+    Year = format(as.POSIXlt(timestamp),'%Y'),
+    Hour = format(as.POSIXlt(timestamp),'%H'),
+    day_week = format(as.POSIXlt(timestamp),'%u')
+  )
+
+STdata$monday <- ifelse(STdata$day_week == "1", 1, 0)
+STdata$tuesday <- ifelse(STdata$day_week == "2", 2, 0)
+STdata$wednesday <- ifelse(STdata$day_week == "3", 3, 0)
+STdata$thursday <- ifelse(STdata$day_week == "4", 4, 0)
+STdata$friday <- ifelse(STdata$day_week == "5", 5, 0)
+STdata$saturday <- ifelse(STdata$day_week == "6", 6, 0)
+
+STdata$Month=as.integer(STdata$Month)
+STdata$Day=as.integer(STdata$Day)
+STdata$Year=as.integer(STdata$Year)
+STdata$Hour=as.integer(STdata$Hour)
+
+STdata <- filter(STdata, Month %in% c(1,2,3,4))
+
+STdata_final <- select(STdata, element_key, latitude,longitude, Month, Day, Hour, road_temp, monday, tuesday, wednesday, thursday, friday, tmin, day_year, occupation_perc)
+
+head(STdata_final)
+
+```
+
+
+### The GP models:
+
+## Spatial prediction/interpolation
+
+# Lectura de datos
+
+En este punto, vamos a apartar el día 1 de abril del año 2016 que es el que comprende nuestro dataset como día de predicción.
+```{r}
+s<-c('1037','1045','1046','1433','9510','11878','12289','13549','13793','14677',
+     '18622','24557','30698','34938','35681','35682','37134','37177','41030','59958',
+     '62458','63125','69098','76961','76962','79741','81117','85381','85385','86449')
+DataFit<-spT.subset(data=STdata_final, var.name=c("element_key"), s=s) #el reverse quita los index y se queda con todo menos eso
+DataFit<-subset(DataFit, with(DataFit, !(Day %in% c(1) & Month == 4)))
+DataValPred<-spT.subset(data=STdata_final, var.name=c("element_key"), s=s)
+DataValPred<-subset(DataValPred, with(DataValPred, !(Day %in% c(1) & Month == 4)))
+```
+
+
+Lo siguiente Va a ser ejecutar el modelo Markov chain Monte Carlo(MCMC) usando el algoritmo Gibbs sampler.
+ 
+```{r}
+set.seed(11)
+post.gp <- spT.Gibbs(formula=occupation_perc ~Hour+tmin+road_temp+monday+tuesday+wednesday+thursday+friday,
+                     data=DataFit, 
+                     model="GP", 
+                     coords=~longitude+latitude,
+                     distance.method="geodetic:km", 
+                     scale.transform="SQRT",
+                     tol.dist=0.001,
+                     spatial.decay=spT.decay(distribution=Gamm(2,1),tuning=0.01))
+print(post.gp)
+```
+
+A Continuación:
+
+1. Definimos las coordinadas de predicción 
+2. Hacemos una predicción espacial usando spT.Gibbs output
+3. Hacemos una validación de criterio
+
+
+
+```{r}
+# Define prediction coordinates
+pred.coords<-as.matrix(unique(cbind(DataValPred[,2:3])))
+# Spatial prediction using spT.Gibbs output
+set.seed(11)
+pred.gp <- predict(post.gp, newdata=DataValPred, newcoords=pred.coords)
+print(pred.gp)
+names(pred.gp)
+# validation criteria
+spT.validation(DataValPred$occupation_perc,c(pred.gp$Mean))
+```
+
+
+Para el siguiente paso, podemos elegir:
+1. Hacer una predicción temporal en localizaciones NO OBSERVADAS
+2. Hacer una predicción temporal en localizaciones OBSERVADAS
+Como nuestro interés el la predicción de la ocupación de los parquimetros seleccionados.  
+
+
+```{r}
+
+##
+## Temporal prediction/forecast
+## 2. In the observed/fitted locations
+##
+# Read data
+DataFitFore<-spT.subset(data=STdata_final, var.name=c("element_key"), s=s)
+DataFitFore<-subset(DataFitFore, with(DataFitFore, (Day %in% c(1) & Month == 4)))
+# define forecast coordinates
+fore.coords<-as.matrix(unique(cbind(DataFitFore[,2:3])))
+# Two-step ahead forecast, i.e., in day 61 and 62
+# in the unobserved locations using output from spT.Gibbs
+set.seed(11)
+
+fore.gp <- predict(post.gp, newdata=DataFitFore, newcoords=fore.coords,
+                   type="temporal", foreStep=12, tol.dist=0.001)
+print(fore.gp)
+names(fore.gp)
+```
+
+Vamos a validar las predicciones
+
+
+```{r}
+spT.validation(DataFitFore$occupation_perc,c(fore.gp$Mean))
+
+```
+
+
+Hacemos plotting utilizando la librería Forecast
+
+Parquímetro 1037:
+```{r}
+# Use of "forecast" class
+library(forecast)
+tmp<-as.forecast.object(fore.gp, site=1) # Para el parquímetro 1037
+plot(tmp)
+```
+
+
+Parquímetro 1045:
+
+
+```{r}
+
+# Use of "forecast" class
+library(forecast)
+tmp<-as.forecast.object(fore.gp, site=2) # Para el parquímetro 1045
+plot(tmp)
+
+```
+
+
+```{r}
+# Use of "forecast" class
+library(forecast)
+tmp<-as.forecast.object(fore.gp, site=30) # Para el parquímetro 86449
+plot(tmp)
+```
+
+

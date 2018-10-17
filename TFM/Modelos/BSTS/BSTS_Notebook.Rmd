@@ -1,0 +1,893 @@
+---
+title: "TFM BSTS Notebook"
+output: html_notebook
+---
+
+```{r, include=FALSE}
+
+if (!require("bsts")){
+  install.packages("bsts") 
+  library(bsts)
+}
+
+if (!require("lubridate")){
+  install.packages("lubridate") 
+  library(lubridate)
+}
+
+if (!require("MLmetrics")){
+  install.packages("MLmetrics") 
+  library(MLmetrics)
+}
+
+if (!require("ggplot2")){
+  install.packages("ggplot2") 
+  library(ggplot2)
+}
+
+if (!require("scales")){
+  install.packages("scales") 
+  library(scales)
+}
+
+if (!require("dplyr")){
+  install.packages("dplyr") 
+  library(dplyr)
+}
+
+if (!require("imputeTS")){
+  install.packages("imputeTS") 
+  library(imputeTS)
+}
+
+if (!require("forecast")){
+  install.packages("forecast") 
+  library(forecast)
+}
+
+```
+
+
+### Carga del fichero y creación de variables
+
+
+```{r}
+
+
+
+setwd("C:\\Users\\Admin\\Documents\\!!!!! UAH\\UAH-TFM-master_V4\\data")
+
+data0 <- read.table("SerieTotal2016_ext_selected.csv", sep=",", header=T)
+
+data0$timestamp <- ymd_hms(data0$timestamp)
+data0$year      <- year(data0$timestamp)
+data0$month     <- month(data0$timestamp)
+data0$WeekDay   <- weekdays(data0$timestamp)
+
+data0$day_week <- wday(data0$timestamp)
+
+data0$monday <- (data0$day_week == "2")
+data0$tuesday <- (data0$day_week == "3")
+data0$wednesday <- (data0$day_week == "4")
+data0$thursday <- (data0$day_week == "5")
+data0$friday <- (data0$day_week == "6")
+data0$saturday <- (data0$day_week == "7")
+
+```
+
+# Funciones para crear modelos con y sin regresores.
+***
+### Cada función tiene componentes "season" que son generales para todos los casos.
+### En las funciones siguientes se añadiran componentes a la variable ss (estado)
+
+```{r}
+
+modelo_sin_regresores <- function(ss,y)
+{
+  
+  ss <- AddSeasonal(ss, y, nseasons = 12)
+  ss <- AddSeasonal(ss, y, nseasons = 6, season.duration = 12)
+  
+  model <- bsts(y,state.specification = ss, seed = 1232, niter = niter, ping=0)
+  
+  return(model)
+  
+}
+
+modelo_con_regresores <- function(ss,data)
+{
+  
+  y <- data$occupation_perc
+  
+  ss <- AddSeasonal(ss, y, nseasons = 12)
+  ss <- AddSeasonal(ss, y, nseasons = 6, season.duration = 12)
+  
+  model <- bsts(occupation_perc  ~ road_temp + monday + tuesday + wednesday + thursday + friday + tmin,
+                state.specification = ss,
+                na.action = na.omit,
+                data = data, 
+                niter = niter,
+                seed = 1232,
+                expected.model.size = 20,
+                ping=0)
+  
+  return(model)
+  
+}
+
+```
+
+
+
+
+
+# AddLocalLevel
+***
+### AddLocalLevel sin regresores.
+***
+### Tiene un bucle externo para crear los datasets (Day Forward-Chaining) y uno interno para recorrer los parametros para CV
+
+```{r}
+
+AddLocalLevel_sin_regresores <- function(ek)
+{
+  
+resultados_val <- c()
+resultados_test <- c()
+trendComponent <- "AddLocalLevel"
+
+n <- 1
+i <- 12 * 30  
+while(i <= nrow(data)-periodos * 12)
+{
+  train <- data[1:(i-12),] 
+  val <- data[(i-11):i,]       
+  test <- data[(i+1):(i+12),] 
+  y=train$occupation_perc
+  for (sigma_guess in c(0.01, 0.1))
+  {
+    sd.prior <- SdPrior(sigma.guess=sigma_guess*sd(y), upper.limit=sd(y), sample.size=25)
+    ss <- AddLocalLevel(list(), y, sigma.prior=sd.prior)
+    model <- modelo_sin_regresores(ss,y)
+    pred <- predict(model, horizon=horizon, burn=SuggestBurn(0.1, model), quantiles = c(.025, .975))
+    res_row <- data.frame(ek=ek, sigma_guess=sigma_guess, MAE=MAE(pred$mean, val$occupation_perc))
+    resultados_val <- rbind(resultados_val, res_row)
+  }
+  sel <- subset(resultados_val, with(resultados_val, resultados_val$MAE == min(resultados_val$MAE)))
+  sigma_guess = sel[1,2]
+  sd.prior <- SdPrior(sigma.guess=sigma_guess*sd(y), upper.limit=sd(y), sample.size=25)
+  ss <- AddLocalLevel(list(), y, sigma.prior=sd.prior)
+  model <- modelo_sin_regresores(ss,y)
+  pred <- predict(model, horizon=horizon, burn=SuggestBurn(0.1, model), quantiles = c(.025, .975))
+  res_row <- data.frame(ek=ek, sigma_guess=sigma_guess, iteraction = n, MAE=MAE(pred$mean, test$occupation_perc))
+  n = n + 1
+  resultados_test <- rbind(resultados_test, res_row)
+  i = i + 12
+}
+
+fichero = paste("ek_",trendComponent,"_sin_regresores_",ek,".csv",sep="")
+write.csv(resultados_test, file=fichero, row.names=FALSE)
+
+
+}
+
+
+```
+
+
+### AddLocalLevel con regresores
+***
+### Tiene un bucle externo para crear los datasets (Day Forward-Chaining) y uno interno para recorrer los parametros para CV
+
+```{r}
+
+AddLocalLevel_con_regresores <- function(ek)
+{
+  
+resultados_val <- c()
+resultados_test <- c()
+trendComponent <- "AddLocalLevel"
+
+n <- 1
+i <- 12 * 30  
+while(i <= nrow(data)-periodos * 12)
+{
+  train <- data[1:(i-12),] 
+  val <- data[(i-11):i,]       
+  test <- data[(i+1):(i+12),] 
+  y=train$occupation_perc
+  for (sigma_guess in c(0.01, 0.1))
+  {
+    sd.prior <- SdPrior(sigma.guess=sigma_guess*sd(y), upper.limit=sd(y), sample.size=25)
+    ss <- AddLocalLevel(list(), y, sigma.prior=sd.prior)
+    model <- modelo_con_regresores(ss,train)
+    pred <- predict(model, horizon=horizon, newdata=val, burn=SuggestBurn(0.1, model), quantiles = c(.025, .975))
+    res_row <- data.frame(ek=ek, sigma_guess=sigma_guess, MAE=MAE(pred$mean, val$occupation_perc))
+    resultados_val <- rbind(resultados_val, res_row)
+  }
+  sel <- subset(resultados_val, with(resultados_val, resultados_val$MAE == min(resultados_val$MAE)))
+  sigma_guess = sel[1,2]
+  sd.prior <- SdPrior(sigma.guess=sigma_guess*sd(y), upper.limit=sd(y), sample.size=25)
+  ss <- AddLocalLevel(list(), y, sigma.prior=sd.prior)
+  model <- modelo_con_regresores(ss,train)
+  pred <- predict(model, horizon=horizon, newdata=test, burn=SuggestBurn(0.1, model), quantiles = c(.025, .975))
+  res_row <- data.frame(ek=ek, sigma_guess=sigma_guess, iteraction = n, MAE=MAE(pred$mean, test$occupation_perc))
+  n = n + 1
+  resultados_test <- rbind(resultados_test, res_row)
+  i = i + 12
+}
+
+fichero = paste("ek_",trendComponent,"_con_regresores_",ek,".csv",sep="")
+write.csv(resultados_test, file=fichero, row.names=FALSE)
+
+}
+
+```
+
+
+# AddAr
+***
+### AddAr sin regresores
+***
+### Tiene un bucle externo para crear los datasets (Day Forward-Chaining) y uno interno para recorrer los parametros para CV
+
+```{r}
+
+AddAr_sin_regresores <- function(ek)
+{
+  
+resultados_val <- c()
+resultados_test <- c()
+trendComponent <- "AddAr"
+
+n <- 1
+i <- 12 * 30  
+while(i <= nrow(data)-periodos * 12)
+{
+  train <- data[1:(i-12),] 
+  val <- data[(i-11):i,]       
+  test <- data[(i+1):(i+12),] 
+  y=train$occupation_perc
+  for (sigma_guess in c(0.01, 0.1))
+  {
+    sd.prior <- SdPrior(sigma.guess=sigma_guess*sd(y), upper.limit=sd(y), sample.size=25)
+    ss <- AddAr(list(), y, sigma.prior=sd.prior)
+    model <- modelo_sin_regresores(ss,y)
+    pred <- predict(model, horizon=horizon, burn=SuggestBurn(0.1, model), quantiles = c(.025, .975))
+    res_row <- data.frame(ek=ek, sigma_guess=sigma_guess, MAE=MAE(pred$mean, val$occupation_perc))
+    resultados_val <- rbind(resultados_val, res_row)
+  }
+  sel <- subset(resultados_val, with(resultados_val, resultados_val$MAE == min(resultados_val$MAE)))
+  sigma_guess = sel[1,2]
+  sd.prior <- SdPrior(sigma.guess=sigma_guess*sd(y), upper.limit=sd(y), sample.size=25)
+  ss <- AddAr(list(), y, sigma.prior=sd.prior)
+  model <- modelo_sin_regresores(ss,y)
+  pred <- predict(model, horizon=horizon, burn=SuggestBurn(0.1, model), quantiles = c(.025, .975))
+  res_row <- data.frame(ek=ek, sigma_guess=sigma_guess, iteraction = n, MAE=MAE(pred$mean, test$occupation_perc))
+  n = n + 1
+  resultados_test <- rbind(resultados_test, res_row)
+  i = i + 12
+}
+
+fichero = paste("ek_",trendComponent,"_sin_regresores_",ek,".csv",sep="")
+write.csv(resultados_test, file=fichero, row.names=FALSE)
+
+}
+```
+
+
+### AddAr con regresores
+***
+### Tiene un bucle externo para crear los datasets (Day Forward-Chaining) y uno interno para recorrer los parametros para CV
+
+
+```{r}
+
+AddAr_con_regresores <- function(ek)
+{
+  
+resultados_val <- c()
+resultados_test <- c()
+trendComponent <- "AddAr"
+
+n <- 1
+i <- 12 * 30  
+while(i <= nrow(data)-periodos * 12)
+{
+  train <- data[1:(i-12),] 
+  val <- data[(i-11):i,]       
+  test <- data[(i+1):(i+12),] 
+  y=train$occupation_perc
+  for (sigma_guess in c(0.01, 0.1))
+  {
+    sd.prior <- SdPrior(sigma.guess=sigma_guess*sd(y), upper.limit=sd(y), sample.size=25)
+    ss <- AddAr(list(), y, sigma.prior=sd.prior)
+    model <- modelo_con_regresores(ss,train)
+    pred <- predict(model, horizon=horizon, newdata=val, burn=SuggestBurn(0.1, model), quantiles = c(.025, .975))
+    res_row <- data.frame(ek=ek, sigma_guess=sigma_guess, MAE=MAE(pred$mean, val$occupation_perc))
+    resultados_val <- rbind(resultados_val, res_row)
+  }
+  sel <- subset(resultados_val, with(resultados_val, resultados_val$MAE == min(resultados_val$MAE)))
+  sigma_guess = sel[1,2]
+  sd.prior <- SdPrior(sigma.guess=sigma_guess*sd(y), upper.limit=sd(y), sample.size=25)
+  ss <- AddAr(list(), y, sigma.prior=sd.prior)
+  model <- modelo_con_regresores(ss,train)
+  pred <- predict(model, horizon=horizon, newdata=test, burn=SuggestBurn(0.1, model), quantiles = c(.025, .975))
+  res_row <- data.frame(ek=ek, sigma_guess=sigma_guess, iteraction = n, MAE=MAE(pred$mean, test$occupation_perc))
+  n = n + 1
+  resultados_test <- rbind(resultados_test, res_row)
+  i = i + 12
+}
+
+fichero = paste("ek_",trendComponent,"_con_regresores_",ek,".csv",sep="")
+write.csv(resultados_test, file=fichero, row.names=FALSE)
+
+}
+```
+
+
+
+# AddLocalLinearTrend
+***
+### AddLocalLinearTrend sin regresores
+***
+### Tiene un bucle externo para crear los datasets (Day Forward-Chaining) y uno interno para recorrer los parametros para CV
+
+
+```{r}
+
+AddLocalLinearTrend_sin_regresores <- function(ek)
+{
+  
+  
+resultados_val <- c()
+resultados_test <- c()
+trendComponent <- "AddLocalLinearTrend"
+
+n <- 1
+i <- 12 * 30  
+while(i <= nrow(data)-periodos * 12)
+{
+  train <- data[1:(i-12),] 
+  val <- data[(i-11):i,]       
+  test <- data[(i+1):(i+12),] 
+  y=train$occupation_perc
+  for (level_sigma_guess in c(0.01, 0.1)) 
+  {
+      for (slope_sigma_guess in c(0.01, 0.1)) 
+      {
+        sigma.prior <- SdPrior(sigma.guess=level_sigma_guess*sd(y), upper.limit=sd(y), sample.size=25)
+        slope.sigma.prior <- SdPrior(sigma.guess=slope_sigma_guess*sd(y), upper.limit=sd(y), sample.size=25)
+        ss <- AddLocalLinearTrend(list(), y, level.sigma.prior=sigma.prior, slope.sigma.prior=slope.sigma.prior)
+        model <- modelo_sin_regresores(ss,y)
+        pred <- predict(model, horizon=horizon, burn=SuggestBurn(0.1, model), quantiles = c(.025, .975))
+        res_row <- data.frame(ek=ek, level_sigma_guess=level_sigma_guess,slope_sigma_guess=slope_sigma_guess, MAE=MAE(pred$mean, val$occupation_perc))
+        resultados_val <- rbind(resultados_val, res_row)
+      }
+  }
+  sel <- subset(resultados_val, with(resultados_val, resultados_val$MAE == min(resultados_val$MAE)))
+  level_sigma_guess = sel[1,2]
+  slope_sigma_guess = sel[1,3]
+  sigma.prior <- SdPrior(sigma.guess=level_sigma_guess*sd(y), upper.limit=sd(y), sample.size=25)
+  slope.sigma.prior <- SdPrior(sigma.guess=slope_sigma_guess*sd(y), upper.limit=sd(y), sample.size=25)
+  ss <- AddLocalLinearTrend(list(), y, level.sigma.prior=sigma.prior, slope.sigma.prior=slope.sigma.prior)
+  model <- modelo_sin_regresores(ss,y)
+  pred <- predict(model, horizon=horizon, burn=SuggestBurn(0.1, model), quantiles = c(.025, .975))
+  res_row <- data.frame(ek=ek, level_sigma_guess=level_sigma_guess,slope_sigma_guess=slope_sigma_guess, MAE=MAE(pred$mean, test$occupation_perc))
+  n = n + 1
+  resultados_test <- rbind(resultados_test, res_row)
+  i = i + 12
+}
+
+fichero = paste("ek_",trendComponent,"_sin_regresores_",ek,".csv",sep="")
+write.csv(resultados_test, file=fichero, row.names=FALSE)
+
+}
+
+```
+
+
+### AddLocalLinearTrend con regresores
+***
+### Tiene un bucle externo para crear los datasets (Day Forward-Chaining) y uno interno para recorrer los parametros para CV
+
+
+```{r}
+
+AddLocalLinearTrend_con_regresores <- function(ek)
+{
+  
+  
+resultados_val <- c()
+resultados_test <- c()
+trendComponent <- "AddLocalLinearTrend"
+
+n <- 1
+i <- 12 * 30  
+while(i <= nrow(data)-periodos * 12)
+{
+  train <- data[1:(i-12),] 
+  val <- data[(i-11):i,]       
+  test <- data[(i+1):(i+12),] 
+  y=train$occupation_perc
+  for (level_sigma_guess in c(0.01, 0.1)) 
+  {
+      for (slope_sigma_guess in c(0.01, 0.1)) 
+      {
+        sigma.prior <- SdPrior(sigma.guess=level_sigma_guess*sd(y), upper.limit=sd(y), sample.size=25)
+        slope.sigma.prior <- SdPrior(sigma.guess=slope_sigma_guess*sd(y), upper.limit=sd(y), sample.size=25)
+        ss <- AddLocalLinearTrend(list(), y, level.sigma.prior=sigma.prior, slope.sigma.prior=slope.sigma.prior)
+        model <- modelo_con_regresores(ss,train)
+        pred <- predict(model, horizon=horizon, newdata=val, burn=SuggestBurn(0.1, model), quantiles = c(.025, .975))
+        res_row <- data.frame(ek=ek, level_sigma_guess=level_sigma_guess,slope_sigma_guess=slope_sigma_guess, MAE=MAE(pred$mean, val$occupation_perc))
+        resultados_val <- rbind(resultados_val, res_row)
+      }
+  }
+  sel <- subset(resultados_val, with(resultados_val, resultados_val$MAE == min(resultados_val$MAE)))
+  level_sigma_guess = sel[1,2]
+  slope_sigma_guess = sel[1,3]
+  sigma.prior <- SdPrior(sigma.guess=level_sigma_guess*sd(y), upper.limit=sd(y), sample.size=25)
+  slope.sigma.prior <- SdPrior(sigma.guess=slope_sigma_guess*sd(y), upper.limit=sd(y), sample.size=25)
+  ss <- AddLocalLinearTrend(list(), y, level.sigma.prior=sigma.prior, slope.sigma.prior=slope.sigma.prior)
+  model <- modelo_con_regresores(ss,train)
+  pred <- predict(model, horizon=horizon, newdata=test, burn=SuggestBurn(0.1, model), quantiles = c(.025, .975))
+  res_row <- data.frame(ek=ek, level_sigma_guess=level_sigma_guess,slope_sigma_guess=slope_sigma_guess, MAE=MAE(pred$mean, test$occupation_perc))
+  n = n + 1
+  resultados_test <- rbind(resultados_test, res_row)
+  i = i + 12
+}
+
+fichero = paste("ek_",trendComponent,"_con_regresores_",ek,".csv",sep="")
+write.csv(resultados_test, file=fichero, row.names=FALSE)
+
+}
+```
+
+
+
+
+
+
+# Obtención de resultados
+***
+### AddLocalLevel
+***
+### Se aplican los mejores parametros del entrenamiento
+### Como el entrenamiento se ha hecho con el primer trimestre se usa el primer dia desl segundo trimestre
+
+
+```{r}
+
+resultados_AddLocalLevel_sin_regresores <- function(ek)
+{
+
+datax = data0[data0$element_key== ek,]
+datax = subset(datax, datax$day_year <= 92)
+
+i=936
+train <- datax[1:i,]
+p <- i + 1
+q <- i + 12
+test <- datax[p:q,]
+
+trendComponent <- "AddLocalLevel"
+
+nombre_fichero = paste("ek_",trendComponent,"_sin_regresores_",ek,".csv",sep="")
+fichero <- read.csv(nombre_fichero)
+sel <- subset(fichero, with(fichero, fichero$MAE == min(fichero$MAE)))
+sigma_guess = sel[1,2]
+
+y <- train$occupation_perc
+
+sd.prior <- SdPrior(sigma.guess=sigma_guess*sd(y), upper.limit=sd(y), sample.size=25)
+ss <- AddLocalLevel(list(), y, sigma.prior=sd.prior)
+
+model <- modelo_sin_regresores(ss,y)
+
+pred <- predict(model, horizon=horizon, burn=SuggestBurn(0.1, model))
+
+MAE_AddLocalLevel_sin_regresores=MAE(pred$mean, test$occupation_perc)
+
+modelo_AddLocalLevel_sin_regresores <<- model
+
+resultados_ek <<-rbind(resultados_ek,
+c(ek, as.character("AddLocalLevel SR"), 
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[1])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[2])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[3])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[4])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[5])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[6])),
+      list(fichero$MAE),
+      MAE(pred$mean, test$occupation_perc)
+      )
+)
+x <- c("element_key", "model", "mae_min", "mae_1q", "mae_median",
+       "mae_mean", "mae_3q", "mae_max","mae_list", "mae")
+colnames(resultados_ek) <- x
+
+}
+
+```
+
+
+```{r}
+
+resultados_AddLocalLevel_con_regresores <- function(ek)
+{
+
+datax = data0[data0$element_key== ek,]
+datax = subset(datax, datax$day_year <= 92)
+
+i=936
+train <- datax[1:i,]
+p <- i + 1
+q <- i + 12
+test <- datax[p:q,]
+
+trendComponent <- "AddLocalLevel"
+
+nombre_fichero = paste("ek_",trendComponent,"_con_regresores_",ek,".csv",sep="")
+fichero <- read.csv(nombre_fichero)
+sel <- subset(fichero, with(fichero, fichero$MAE == min(fichero$MAE)))
+sigma_guess = sel[1,2]
+
+y <- train$occupation_perc
+
+sd.prior <- SdPrior(sigma.guess=sigma_guess*sd(y), upper.limit=sd(y), sample.size=25)
+ss <- AddLocalLevel(list(), y, sigma.prior=sd.prior)
+
+model <- modelo_con_regresores(ss,train)
+
+pred <- predict(model, horizon=horizon, newdata = test, burn=SuggestBurn(0.1, model))
+
+MAE_AddLocalLevel_con_regresores=MAE(pred$mean, test$occupation_perc)
+
+modelo_AddLocalLevel_con_regresores <<- model
+
+resultados_ek <<-rbind(resultados_ek,
+c(ek, as.character("AddLocalLevel CR"), 
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[1])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[2])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[3])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[4])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[5])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[6])),
+      list(fichero$MAE),
+      MAE(pred$mean, test$occupation_perc)
+      )
+)
+x <- c("element_key", "model", "mae_min", "mae_1q", "mae_median",
+       "mae_mean", "mae_3q", "mae_max","mae_list", "mae")
+colnames(resultados_ek) <- x
+
+}
+
+```
+
+
+
+### AddLocalLinearTrend
+***
+### Se aplican los mejores parametros del entrenamiento
+### Como el entrenamiento se ha hecho con el primer trimestre se usa el primer dia desl segundo trimestre
+
+
+
+```{r}
+
+resultados_AddLocalLinearTrend_sin_regresores <- function(ek)
+{
+
+datax = data0[data0$element_key== ek,]
+datax = subset(datax, datax$day_year <= 92)
+
+i=936
+train <- datax[1:i,]
+p <- i + 1
+q <- i + 12
+test <- datax[p:q,]
+
+trendComponent <- "AddLocalLinearTrend"
+
+nombre_fichero = paste("ek_",trendComponent,"_sin_regresores_",ek,".csv",sep="")
+fichero <- read.csv(nombre_fichero)
+sel <- subset(fichero, with(fichero, fichero$MAE == min(fichero$MAE)))
+
+level_sigma_guess = sel[1,2]
+slope_sigma_guess = sel[1,3]
+
+y <- train$occupation_perc
+
+sigma.prior <- SdPrior(sigma.guess=level_sigma_guess*sd(y), upper.limit=sd(y), sample.size=25)
+slope.sigma.prior <- SdPrior(sigma.guess=slope_sigma_guess*sd(y), upper.limit=sd(y), sample.size=25)
+ss <- AddLocalLinearTrend(list(), y, level.sigma.prior=sigma.prior, slope.sigma.prior=slope.sigma.prior)
+model <- modelo_sin_regresores(ss,y)
+pred <- predict(model, horizon=horizon, burn=SuggestBurn(0.1, model))
+
+MAE_AddLocalLinearTrend_sin_regresores=MAE(pred$mean, test$occupation_perc)
+  
+modelo_AddLocalLinearTrend_sin_regresores <<- model
+
+
+resultados_ek <<-rbind(resultados_ek,
+c(ek, as.character("AddLocalLinearTrend SR"), 
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[1])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[2])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[3])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[4])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[5])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[6])),
+      list(fichero$MAE),
+      MAE(pred$mean, test$occupation_perc)
+      )
+)
+x <- c("element_key", "model", "mae_min", "mae_1q", "mae_median",
+       "mae_mean", "mae_3q", "mae_max","mae_list", "mae")
+colnames(resultados_ek) <- x
+
+}
+
+```
+
+
+
+
+
+```{r}
+
+resultados_AddLocalLinearTrend_con_regresores <- function(ek)
+{
+
+datax = data0[data0$element_key== ek,]
+datax = subset(datax, datax$day_year <= 92)
+
+i=936
+train <- datax[1:i,]
+p <- i + 1
+q <- i + 12
+test <- datax[p:q,]
+
+trendComponent <- "AddLocalLinearTrend"
+
+nombre_fichero = paste("ek_",trendComponent,"_con_regresores_",ek,".csv",sep="")
+fichero <- read.csv(nombre_fichero)
+sel <- subset(fichero, with(fichero, fichero$MAE == min(fichero$MAE)))
+
+level_sigma_guess = sel[1,2]
+slope_sigma_guess = sel[1,3]
+
+y <- train$occupation_perc
+
+sigma.prior <- SdPrior(sigma.guess=level_sigma_guess*sd(y), upper.limit=sd(y), sample.size=25)
+slope.sigma.prior <- SdPrior(sigma.guess=slope_sigma_guess*sd(y), upper.limit=sd(y), sample.size=25)
+ss <- AddLocalLinearTrend(list(), y, level.sigma.prior=sigma.prior, slope.sigma.prior=slope.sigma.prior)
+model <- modelo_con_regresores(ss,train)
+pred <- predict(model, horizon=horizon, newdata=test, burn=SuggestBurn(0.1, model))
+
+MAE_AddLocalLinearTrend_con_regresores=MAE(pred$mean, test$occupation_perc)
+  
+modelo_AddLocalLinearTrend_con_regresores <<- model
+
+resultados_ek <<-rbind(resultados_ek,
+c(ek, as.character("AddLocalLinearTrend CR"), 
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[1])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[2])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[3])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[4])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[5])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[6])),
+      list(fichero$MAE),
+      MAE(pred$mean, test$occupation_perc)
+      )
+)
+x <- c("element_key", "model", "mae_min", "mae_1q", "mae_median",
+       "mae_mean", "mae_3q", "mae_max","mae_list", "mae")
+colnames(resultados_ek) <- x
+
+}
+
+```
+
+
+
+### AddAr
+***
+### Se aplican los mejores parametros del entrenamiento
+### Como el entrenamiento se ha hecho con el primer trimestre se usa el primer dia desl segundo trimestre
+
+
+
+```{r}
+
+resultados_AddAr_sin_regresores <- function(ek)
+{
+
+datax = data0[data0$element_key== ek,]
+datax = subset(datax, datax$day_year <= 92)
+
+i=936
+train <- datax[1:i,]
+p <- i + 1
+q <- i + 12
+test <- datax[p:q,]
+
+trendComponent <- "AddAr"
+
+nombre_fichero = paste("ek_",trendComponent,"_sin_regresores_",ek,".csv",sep="")
+fichero <- read.csv(nombre_fichero)
+sel <- subset(fichero, with(fichero, fichero$MAE == min(fichero$MAE)))
+sigma_guess = sel[1,2]
+
+y <- train$occupation_perc
+
+sd.prior <- SdPrior(sigma.guess=sigma_guess*sd(y), upper.limit=sd(y), sample.size=25)
+ss <- AddAr(list(), y, sigma.prior=sd.prior)
+
+model <- modelo_sin_regresores(ss,y)
+
+pred <- predict(model, horizon=horizon, burn=SuggestBurn(0.1, model))
+
+MAE_AddAr_sin_regresores=MAE(pred$mean, test$occupation_perc)
+
+modelo_AddAr_sin_regresores <<- model
+
+resultados_ek <<-rbind(resultados_ek,
+c(ek, as.character("AddAr SR"), 
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[1])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[2])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[3])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[4])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[5])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[6])),
+      list(fichero$MAE),
+      MAE(pred$mean, test$occupation_perc)
+      )
+)
+x <- c("element_key", "model", "mae_min", "mae_1q", "mae_median",
+       "mae_mean", "mae_3q", "mae_max","mae_list", "mae")
+colnames(resultados_ek) <- x
+
+}
+
+```
+
+
+```{r}
+
+resultados_AddAr_con_regresores <- function(ek)
+{
+
+datax = data0[data0$element_key== ek,]
+datax = subset(datax, datax$day_year <= 92)
+
+i=936
+train <- datax[1:i,]
+p <- i + 1
+q <- i + 12
+test <- datax[p:q,]
+
+trendComponent <- "AddAr"
+
+nombre_fichero = paste("ek_",trendComponent,"_con_regresores_",ek,".csv",sep="")
+fichero <- read.csv(nombre_fichero)
+sel <- subset(fichero, with(fichero, fichero$MAE == min(fichero$MAE)))
+sigma_guess = sel[1,2]
+
+y <- train$occupation_perc
+
+sd.prior <- SdPrior(sigma.guess=sigma_guess*sd(y), upper.limit=sd(y), sample.size=25)
+ss <- AddAr(list(), y, sigma.prior=sd.prior)
+
+model <- modelo_con_regresores(ss,train)
+
+pred <- predict(model, horizon=horizon, newdata = test, burn=SuggestBurn(0.1, model))
+
+MAE_AddAr_con_regresores=MAE(pred$mean, test$occupation_perc)
+
+modelo_AddAr_con_regresores <<- model
+
+resultados_ek <<-rbind(resultados_ek,
+c(ek, as.character("AddAr CR"), 
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[1])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[2])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[3])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[4])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[5])),
+      as.numeric(sub('.*:', '', summary(fichero$MAE)[6])),
+      list(fichero$MAE),
+      MAE(pred$mean, test$occupation_perc)
+      )
+)
+x <- c("element_key", "model", "mae_min", "mae_1q", "mae_median",
+       "mae_mean", "mae_3q", "mae_max","mae_list", "mae")
+colnames(resultados_ek) <- x
+
+}
+
+
+```
+
+
+```{r}
+horizon = 12
+niter = 1000
+periodos <- 1 # !!!!! es una variable que controla las iteraciones dentro del trimestre. Para programar y que no dure mucho la ejecución es mejor poner periodos = 48
+unique(data0$element_key)
+```
+
+
+# Cuerpo principal
+***
+### Bucle que recorre todos los ek y aplica a cada uno de ellos un estudio con obtención de resultados.
+
+```{r}
+
+print(format(Sys.time(), "%a %b %d %X %Y"))
+
+lista <- unique(data0$element_key)
+#lista <- lista[1:12] # !!!!! si se quiere usar solo element-key concretos se quita el comentario y se seleccionan
+for(ek in lista)
+{
+  print(ek)
+  #ek = "1037"
+  data = data0[data0$element_key== ek,]
+  data = subset(data, data$day_year <= 91)
+  
+  AddLocalLevel_sin_regresores(ek)
+  AddLocalLevel_con_regresores(ek)
+  AddAr_sin_regresores(ek)
+  AddAr_con_regresores(ek)
+  AddLocalLinearTrend_sin_regresores(ek)
+  AddLocalLinearTrend_con_regresores(ek)
+  
+  resultados_ek <- c()
+  resultados_AddLocalLevel_sin_regresores(ek)
+  resultados_AddLocalLevel_con_regresores(ek)
+  resultados_AddAr_sin_regresores(ek)
+  resultados_AddAr_con_regresores(ek)
+  resultados_AddLocalLinearTrend_sin_regresores(ek)
+  resultados_AddLocalLinearTrend_con_regresores(ek)
+  
+  CompareBstsModels(list("Sin regresores" = modelo_AddLocalLevel_sin_regresores,
+                         "Con regresores" = modelo_AddLocalLevel_con_regresores),
+                      filename= paste("ek_AddLocalLevel_",ek,".pdf",sep=""),
+                      main = paste("AddLocalLevel",ek))
+  
+  CompareBstsModels(list("Sin regresores" = modelo_AddAr_sin_regresores,
+                        "Con regresores" = modelo_AddAr_con_regresores),
+                   filename= paste("ek_AddAr_",ek,".pdf",sep=""),
+                     main = paste("AddAr",ek))
+  
+  CompareBstsModels(list("Sin regresores" = modelo_AddLocalLinearTrend_sin_regresores,
+                         "Con regresores" = modelo_AddLocalLinearTrend_con_regresores),
+                    filename= paste("ek_AddLocalLinearTrend_",ek,".pdf",sep=""),
+                      main = paste("AddLocalLinearTrend",ek))
+  
+  CompareBstsModels(list("AddLocalLevel" = modelo_AddLocalLevel_sin_regresores,
+                         "AddAr" = modelo_AddAr_sin_regresores,
+                         "AddLocalLinearTrend" = modelo_AddLocalLinearTrend_sin_regresores),
+                    filename= paste("ek_sin_regresores_",ek,".pdf",sep=""),
+                      main = paste("Sin regresores",ek))
+  
+  CompareBstsModels(list("AddLocalLevel" = modelo_AddLocalLevel_con_regresores,
+                         "AddAr" = modelo_AddAr_con_regresores,
+                         "AddLocalLinearTrend" = modelo_AddLocalLinearTrend_con_regresores),
+                    filename= paste("ek_con_regresores_",ek,".pdf",sep=""),
+                      main = paste("Con regresores",ek))
+  
+  fichero = paste("ek_resultados_",ek,".csv",sep="")
+  x <- c("element_key", "model", "mae_min", "mae_1q", "mae_median",
+         "mae_mean", "mae_3q", "mae_max","mae_list", "mae")
+  colnames(resultados_ek) <- x
+  write.csv(resultados_ek, file=fichero, row.names=FALSE)
+}
+
+print(format(Sys.time(), "%a %b %d %X %Y"))
+
+```
+
+
+
+
+
